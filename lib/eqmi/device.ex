@@ -198,20 +198,20 @@ defmodule Eqmi.Device do
         _from,
         %{device: dev, control_points: controls} = s
       ) do
-    client = Map.get(controls, ref)
+    case Map.get(controls, ref) do
+      %ClientState{} = client ->
+        tx_id = client.current_tx + 1
+        payload = qmux_sdu(client.type, :request, tx_id, msg)
+        header = Eqmi.QmuxHeader.new(:control_point, client.id, client.type, byte_size(payload))
+        qmux_msg = Eqmi.qmux_message(header, payload)
+        new_client = %{client | current_tx: tx_id}
+        new_ctrls = Map.put(controls, ref, new_client)
+        res = IO.binwrite(dev, qmux_msg)
 
-    if client != nil do
-      tx_id = client.current_tx + 1
-      payload = qmux_sdu(client.type, :request, tx_id, msg)
-      header = Eqmi.QmuxHeader.new(:control_point, client.id, client.type, byte_size(payload))
-      qmux_msg = Eqmi.qmux_message(header, payload)
-      new_client = %ClientState{client | current_tx: tx_id}
-      new_ctrls = Map.put(controls, ref, new_client)
-      res = IO.binwrite(dev, qmux_msg)
+        {:reply, res, %{s | control_points: new_ctrls}}
 
-      {:reply, res, %{s | control_points: new_ctrls}}
-    else
-      {:reply, {:error, "control_point not found"}, s}
+      nil ->
+        {:reply, {:error, "control_point not found"}, s}
     end
   end
 
