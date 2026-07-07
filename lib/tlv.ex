@@ -87,6 +87,10 @@ defmodule Eqmi.Tlv do
       end
 
     <<val::binary-size(len), rest::binary>> = payload
+
+    # modems mix ASCII, GSM-7 packed and UCS-2LE in string fields;
+    # fixed-size strings are copied raw, like libqmi does
+    val = if fix_size == nil, do: Eqmi.Text.decode_string(val), else: val
     {val, rest}
   end
 
