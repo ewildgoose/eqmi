@@ -68,13 +68,22 @@ defmodule Eqmi.Tlv do
 
   def decode_tlv(%{"format" => "string"} = obj, data) do
     fix_size = Map.get(obj, "fixed-size")
+    prefix = Map.get(obj, "size-prefix-format")
 
     {len, payload} =
-      if fix_size != nil do
-        {String.to_integer(fix_size), data}
-      else
-        prefix_size = Map.get(obj, "size-prefix-format", "guint8")
-        decode_tlv(%{"format" => prefix_size}, data)
+      cond do
+        fix_size != nil ->
+          {String.to_integer(fix_size), data}
+
+        # a string that is the whole TLV value carries no size prefix:
+        # its length is the TLV length. Size prefixes only apply to
+        # strings nested inside structs/sequences/arrays (see libqmi
+        # qmi-codegen VariableString.py).
+        prefix == nil and Map.get(obj, "type") == "TLV" ->
+          {byte_size(data), data}
+
+        true ->
+          decode_tlv(%{"format" => prefix || "guint8"}, data)
       end
 
     <<val::binary-size(len), rest::binary>> = payload
@@ -178,16 +187,25 @@ defmodule Eqmi.Tlv do
     {len, content}
   end
 
-  defp encode_value(%{"format" => "string"}, data) do
-    val =
-      data
-      |> to_charlist()
+  defp encode_value(%{"format" => "string"} = obj, data) do
+    content = data |> to_charlist() |> :binary.list_to_bin()
+    len = byte_size(content)
+    prefix = Map.get(obj, "size-prefix-format")
 
-    len = length(val)
+    # mirror of decode_tlv: strings nested inside structs/sequences/arrays
+    # get a size prefix (default guint8), a string that is the whole TLV
+    # value does not
+    cond do
+      Map.get(obj, "fixed-size") != nil ->
+        {len, content}
 
-    content = :binary.list_to_bin(val)
+      prefix == nil and Map.get(obj, "type") == "TLV" ->
+        {len, content}
 
-    {len, content}
+      true ->
+        {plen, pbin} = encode_value(%{"format" => prefix || "guint8"}, len)
+        {plen + len, <<pbin::binary, content::binary>>}
+    end
   end
 
   defp encode_value(
