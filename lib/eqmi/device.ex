@@ -246,12 +246,24 @@ defmodule Eqmi.Device do
   end
 
   defp release_base(ref, %{clients: clients, control_points: controls} = s) do
-    control_point = Map.get(controls, ref)
-    client_list = Map.get(clients, control_point.type)
-    new_controls = Map.delete(controls, ref)
-    new_client_list = Map.delete(client_list, control_point.id)
-    new_clients = Map.put(clients, control_point.type, new_client_list)
-    %{s | clients: new_clients, control_points: new_controls}
+    case Map.get(controls, ref) do
+      nil ->
+        # already released; the monitor :DOWN for an explicitly released
+        # client ends up here
+        s
+
+      control_point ->
+        Process.demonitor(ref, [:flush])
+        new_controls = Map.delete(controls, ref)
+
+        new_client_list =
+          clients
+          |> Map.get(control_point.type, %{})
+          |> Map.delete(control_point.id)
+
+        new_clients = Map.put(clients, control_point.type, new_client_list)
+        %{s | clients: new_clients, control_points: new_controls}
+    end
   end
 
   defp find_client(clients, service_type, client_id) do
