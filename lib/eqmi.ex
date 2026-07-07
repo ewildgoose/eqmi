@@ -95,6 +95,22 @@ defmodule Eqmi do
     end
   end
 
+  @doc """
+  Send a request and wait for its correlated response.
+
+  Returns `{:ok, response}` or `{:error, reason}`. Unlike `send_message/3`,
+  the reply is matched by transaction id so overlapping requests on one
+  client don't get crossed. Indications are still delivered to the owner's
+  mailbox as `{:qmux, msg}`.
+  """
+  def call(dev_ref, client_ref, msg, timeout \\ 5_000) do
+    with {:ok, path} <- GenServer.call(__MODULE__, {:get_path, dev_ref}) do
+      Eqmi.Device.call(path, client_ref, msg, timeout)
+    else
+      err -> err
+    end
+  end
+
   def init(_) do
     {:ok, %{devices: %{}, refs: %{}}}
   end

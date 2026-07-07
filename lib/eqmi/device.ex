@@ -1,6 +1,5 @@
 defmodule Eqmi.Device do
   use GenServer
-  alias Eqmi.Types
   require Logger
 
   @ctl_id 0
@@ -66,18 +65,23 @@ defmodule Eqmi.Device do
     end
   end
 
-  def qmux_message(dev_name, client_ref, ctrl_flag, service, messages) do
-    dev_name
-    |> base_name()
-    |> via_tuple()
-    |> GenServer.call({:qmux_message, client_ref, ctrl_flag, service, messages})
-  end
-
   def send_message(dev_name, ref, msg) do
     dev_name
     |> base_name()
     |> via_tuple()
     |> GenServer.call({:send_msg, ref, msg})
+  end
+
+  @doc """
+  Send request messages and wait for the response with the matching
+  transaction id, so concurrent requests on one client cannot pick up
+  each other's replies. Indications still go to the owner's mailbox.
+  """
+  def call(dev_name, ref, msg, timeout \\ 5_000) do
+    dev_name
+    |> base_name()
+    |> via_tuple()
+    |> GenServer.call({:call_msg, ref, msg, timeout}, timeout + 1_000)
   end
 
   def send_raw(dev_name, msg) do
@@ -106,6 +110,7 @@ defmodule Eqmi.Device do
            device_name: device,
            control_points: %{},
            clients: %{:qmi_ctl => %{@ctl_id => ctl}},
+           pending: %{},
            ctl: ctl
          }}
 
@@ -114,23 +119,19 @@ defmodule Eqmi.Device do
     end
   end
 
-  defp qmux_sdu(msg_type, transaction_id, messages) do
-    msg_id = Types.message_id(msg_type)
-
-    ctrl_flag = <<msg_id::unsigned-integer-size(8)>>
-    tx_id = <<transaction_id::unsigned-integer-size(8)>>
-
-    [ctrl_flag, tx_id, messages]
-    |> :erlang.list_to_binary()
+  # Build a service request frame and return the transaction id used, so
+  # a caller can correlate the response. tx_id wraps within the 16-bit
+  # field, skipping 0.
+  defp build_client_msg(client, msg) do
+    tx_id = next_tx(client.current_tx)
+    payload = qmux_sdu(client.type, :request, tx_id, msg)
+    header = Eqmi.QmuxHeader.new(:control_point, client.id, client.type, byte_size(payload))
+    qmux_msg = Eqmi.qmux_message(header, payload)
+    {tx_id, qmux_msg}
   end
 
-  defp gen_tx_id(:request, id) do
-    id + 1
-  end
-
-  defp gen_tx_id(_, id) do
-    id
-  end
+  defp next_tx(tx) when tx >= 0xFFFF, do: 1
+  defp next_tx(tx), do: tx + 1
 
   def handle_call(:get_ctl, _from, s) do
     {:reply, {:ok, s.ctl}, s}
@@ -168,49 +169,43 @@ defmodule Eqmi.Device do
   end
 
   def handle_call(
-        {:qmux_message, client_ref, ctrl_flag, service, messages},
-        _from,
-        %{clients: clients} = s
-      ) do
-    result = Map.get(clients, client_ref)
-
-    case result do
-      {:ok, client} ->
-        tx_id = gen_tx_id(ctrl_flag, client.current_tx)
-        payload = qmux_sdu(ctrl_flag, tx_id, messages)
-        header = Eqmi.QmuxHeader.new(client.type, client.id, service, byte_size(payload))
-        if_type = <<1::little-unsigned-integer-size(8)>>
-
-        msg =
-          [if_type, header, payload]
-          |> :erlang.list_to_binary()
-
-        updated_client = %{client | current_tx: tx_id}
-        new_clients = Map.put(clients, client_ref, updated_client)
-        state = %{s | clients: new_clients}
-        {:reply, msg, state}
-
-      _ ->
-        {:reply, :error, s}
-    end
-  end
-
-  def handle_call(
         {:send_msg, ref, msg},
         _from,
         %{device: dev, control_points: controls} = s
       ) do
     case Map.get(controls, ref) do
       %ClientState{} = client ->
-        tx_id = client.current_tx + 1
-        payload = qmux_sdu(client.type, :request, tx_id, msg)
-        header = Eqmi.QmuxHeader.new(:control_point, client.id, client.type, byte_size(payload))
-        qmux_msg = Eqmi.qmux_message(header, payload)
-        new_client = %{client | current_tx: tx_id}
-        new_ctrls = Map.put(controls, ref, new_client)
+        {tx_id, qmux_msg} = build_client_msg(client, msg)
+        new_ctrls = Map.put(controls, ref, %{client | current_tx: tx_id})
         res = IO.binwrite(dev, qmux_msg)
 
         {:reply, res, %{s | control_points: new_ctrls}}
+
+      nil ->
+        {:reply, {:error, "control_point not found"}, s}
+    end
+  end
+
+  def handle_call(
+        {:call_msg, ref, msg, timeout},
+        from,
+        %{device: dev, control_points: controls} = s
+      ) do
+    case Map.get(controls, ref) do
+      %ClientState{} = client ->
+        {tx_id, qmux_msg} = build_client_msg(client, msg)
+        new_ctrls = Map.put(controls, ref, %{client | current_tx: tx_id})
+
+        case IO.binwrite(dev, qmux_msg) do
+          :ok ->
+            key = {client.type, client.id, tx_id}
+            timer = Process.send_after(self(), {:call_timeout, key}, timeout)
+            pending = Map.put(s.pending, key, {from, timer})
+            {:noreply, %{s | control_points: new_ctrls, pending: pending}}
+
+          err ->
+            {:reply, {:error, err}, %{s | control_points: new_ctrls}}
+        end
 
       nil ->
         {:reply, {:error, "control_point not found"}, s}
@@ -222,15 +217,25 @@ defmodule Eqmi.Device do
     {:reply, res, s}
   end
 
-  def handle_info({:qmux, header, messages}, %{clients: clients} = s) do
+  def handle_info({:qmux, header, messages}, %{clients: clients, pending: pending} = s) do
     # a decoder bug must not take the whole device down; drop the
     # message and keep serving the other clients
     try do
       msg = process_service(header, messages)
-      client = find_client(clients, header.service_type, header.client_id)
+      key = {header.service_type, header.client_id, Map.get(msg, :tx_id)}
 
-      if client != nil do
-        send(client, {:qmux, msg})
+      case Map.get(pending, key) do
+        {from, timer} when :erlang.map_get(:message_type, msg) == :response ->
+          Process.cancel_timer(timer)
+          GenServer.reply(from, {:ok, msg})
+          {:noreply, %{s | pending: Map.delete(pending, key)}}
+
+        _ ->
+          # indication, or a response nobody is awaiting via call/4:
+          # deliver to the owning client's mailbox
+          client = find_client(clients, header.service_type, header.client_id)
+          if client != nil, do: send(client, {:qmux, msg})
+          {:noreply, s}
       end
     rescue
       e ->
@@ -238,9 +243,20 @@ defmodule Eqmi.Device do
           "failed to decode qmux message #{inspect(header)} " <>
             "payload #{inspect(messages, base: :hex, limit: 128)}: #{Exception.message(e)}"
         )
-    end
 
-    {:noreply, s}
+        {:noreply, s}
+    end
+  end
+
+  def handle_info({:call_timeout, key}, %{pending: pending} = s) do
+    case Map.pop(pending, key) do
+      {{from, _timer}, rest} ->
+        GenServer.reply(from, {:error, :timeout})
+        {:noreply, %{s | pending: rest}}
+
+      {nil, _} ->
+        {:noreply, s}
+    end
   end
 
   def handle_info({:DOWN, ref, :process, _object, _reason}, state) do
