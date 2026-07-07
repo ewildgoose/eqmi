@@ -132,7 +132,7 @@ defmodule Eqmi.Control do
   end
 
   def idle(:info, {:qmux, msg}, _data) do
-    IO.inspect(msg, label: "info in idle")
+    Logger.debug("unsolicited qmux message in idle: #{inspect(msg)}")
     :keep_state_and_data
   end
 

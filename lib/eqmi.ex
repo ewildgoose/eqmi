@@ -1,5 +1,6 @@
 defmodule Eqmi do
   use GenServer
+  require Logger
 
   @moduledoc """
   Documentation for `Eqmi`.
@@ -143,11 +144,11 @@ defmodule Eqmi do
   end
 
   def handle_info(msg, s) do
-    IO.inspect(msg, label: "info in server")
+    Logger.warning("unexpected message in Eqmi: #{inspect(msg)}")
     {:noreply, s}
   end
 
   def terminate(reason, _s) do
-    IO.inspect(reason, label: "terminate")
+    Logger.debug("Eqmi terminating: #{inspect(reason)}")
   end
 end

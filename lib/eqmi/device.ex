@@ -103,6 +103,7 @@ defmodule Eqmi.Device do
          %{
            reader: reader,
            device: dev,
+           device_name: device,
            control_points: %{},
            clients: %{:qmi_ctl => %{@ctl_id => ctl}},
            ctl: ctl
@@ -243,12 +244,31 @@ defmodule Eqmi.Device do
   end
 
   def handle_info({:DOWN, ref, :process, _object, _reason}, state) do
+    # release the CID on the modem too, or it stays allocated until the
+    # modem reboots; async because Control calls back into this server
+    # to write to the device
+    case Map.get(state.control_points, ref) do
+      nil ->
+        :ok
+
+      cp ->
+        device = state.device_name
+        Task.start(fn -> Eqmi.Control.release_cid(device, cp.type, cp.id) end)
+    end
+
     new_state = release_base(ref, state)
     {:noreply, new_state}
   end
 
+  def handle_info({:error, reason}, s) do
+    # the reader died or hit EOF; without it we are deaf, so restart the
+    # whole device via the supervisor
+    Logger.error("qmux reader failed on #{s.device_name}: #{inspect(reason)}")
+    {:stop, {:shutdown, {:reader_error, reason}}, s}
+  end
+
   def handle_info(msg, s) do
-    IO.inspect(msg, label: "info in server")
+    Logger.warning("unexpected message in Eqmi.Device: #{inspect(msg)}")
     {:noreply, s}
   end
 
