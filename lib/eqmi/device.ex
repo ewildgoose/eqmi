@@ -43,6 +43,9 @@ defmodule Eqmi.Device do
         |> via_tuple()
         |> GenServer.call({:new_client, type, cid})
 
+      {:error, reason} ->
+        {:error, reason}
+
       _ ->
         {:error, "allocating control point"}
     end

@@ -69,7 +69,7 @@ defmodule Eqmi.Control do
   def init_ctl(:cast, :sync, data) do
     qmux_msg = ctl_msg_base(:sync, [], data.current_tx)
     Eqmi.Device.send_raw(data.device_name, qmux_msg)
-    {:next_state, :wait4_sync, data}
+    {:next_state, :wait4_sync, data, {:state_timeout, 10_000, :sync_response}}
   end
 
   def wait4_sync(:info, {:qmux, %{message_type: :response}}, data) do
@@ -77,12 +77,36 @@ defmodule Eqmi.Control do
   end
 
   def wait4_sync(:info, {:qmux, msg}, _data) do
-    Logger.warn("Waiting 4 sync indication [#{inspect(msg)}]")
-    {:keep_state_and_data, 10_000}
+    Logger.warning("Waiting 4 sync indication [#{inspect(msg)}]")
+    :keep_state_and_data
+  end
+
+  def wait4_sync(:state_timeout, :sync_response, data) do
+    Logger.error(
+      "no response to QMI CTL sync on #{data.device_name}; " <>
+        "device is not speaking raw QMUX (modem in MBIM mode?)"
+    )
+
+    {:next_state, :sync_failed, data}
   end
 
   def wait4_sync({:call, _from}, _msg, _data) do
-    {:keep_state_and_data, [:postpone, 10_000]}
+    {:keep_state_and_data, [:postpone]}
+  end
+
+  # The device never answered the CTL sync request; answer callers with an
+  # error instead of leaving them to hit their own call timeout.
+  def sync_failed({:call, from}, _msg, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :sync_timeout}}]}
+  end
+
+  def sync_failed(:info, {:qmux, %{message_type: :response}}, data) do
+    Logger.info("late sync response on #{data.device_name}, resuming")
+    {:next_state, :idle, data}
+  end
+
+  def sync_failed(:info, _msg, _data) do
+    :keep_state_and_data
   end
 
   def idle({:call, from}, {:allocate, service}, data) do
@@ -93,7 +117,7 @@ defmodule Eqmi.Control do
 
     Eqmi.Device.send_raw(data.device_name, qmux_msg)
     new_data = %{data | client_pid: from, current_tx: tx_id + 1}
-    {:next_state, :wait4_cid, new_data, 10_000}
+    {:next_state, :wait4_cid, new_data, {:state_timeout, 10_000, :cid_response}}
   end
 
   def idle({:call, from}, {:release, service, cid}, data) do
@@ -104,7 +128,7 @@ defmodule Eqmi.Control do
 
     Eqmi.Device.send_raw(data.device_name, qmux_msg)
     new_data = %{data | client_pid: from, current_tx: tx_id + 1}
-    {:next_state, :wait4_release, new_data, 10_000}
+    {:next_state, :wait4_release, new_data, {:state_timeout, 10_000, :release_response}}
   end
 
   def idle(:info, {:qmux, msg}, _data) do
@@ -129,12 +153,18 @@ defmodule Eqmi.Control do
   end
 
   def wait4_cid(:info, {:qmux, msg}, _data) do
-    Logger.warn("Waiting 4 cid indication [#{inspect(msg)}]")
-    {:keep_state_and_data, 10_000}
+    Logger.warning("Waiting 4 cid indication [#{inspect(msg)}]")
+    :keep_state_and_data
+  end
+
+  def wait4_cid(:state_timeout, :cid_response, data) do
+    GenStateMachine.reply(data.client_pid, {:error, :timeout})
+    new_data = %{data | client_pid: nil}
+    {:next_state, :idle, new_data}
   end
 
   def wait4_cid({:call, _from}, _msg, _data) do
-    {:keep_state_and_data, [:postpone, 10_000]}
+    {:keep_state_and_data, [:postpone]}
   end
 
   def wait4_release(:info, {:qmux, _msg}, data) do
@@ -143,8 +173,14 @@ defmodule Eqmi.Control do
     {:next_state, :idle, new_data}
   end
 
+  def wait4_release(:state_timeout, :release_response, data) do
+    GenStateMachine.reply(data.client_pid, {:error, :timeout})
+    new_data = %{data | client_pid: nil}
+    {:next_state, :idle, new_data}
+  end
+
   def wait4_release({:call, _from}, _msg, _data) do
-    {:keep_state_and_data, [:postpone, 10_000]}
+    {:keep_state_and_data, [:postpone]}
   end
 
   defp get_cid(%{msg_id: @allocation_msg_id, parameters: params}) do

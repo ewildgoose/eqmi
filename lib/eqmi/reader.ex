@@ -28,15 +28,16 @@ defmodule Eqmi.Reader do
     <<_version, l::binary>> = qmux
     len = :binary.decode_unsigned(l, :little)
 
-    if len > 2 do
-      msg = IO.binread(dev, len - 2)
-      <<h::binary-size(3), rest::binary>> = msg
+    with true <- len > 2,
+         <<h::binary-size(3), rest::binary>> <- IO.binread(dev, len - 2) do
       header = Eqmi.QmuxHeader.parse(h)
       send(pid, {:qmux, header, rest})
       run_priv(pid, dev)
     else
       # Lost sync. Perhaps multiple clients accessing the device simultaneously?
-      raise "invalid message"
+      bad ->
+        raise "lost qmux framing: header bytes #{inspect(qmux, base: :hex)}, " <>
+                "expected len #{len}, then got #{inspect(bad, base: :hex)}"
     end
   end
 end
