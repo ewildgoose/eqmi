@@ -124,7 +124,7 @@ defmodule Eqmi.Control do
     service = Eqmi.service_type_id(service)
 
     tx_id = data.current_tx
-    qmux_msg = ctl_msg_base(:release_cid, [{:service, service}, {:cid, cid}], tx_id)
+    qmux_msg = ctl_msg_base(:release_cid, [{:release_info, [service: service, cid: cid]}], tx_id)
 
     Eqmi.Device.send_raw(data.device_name, qmux_msg)
     new_data = %{data | client_pid: from, current_tx: tx_id + 1}
@@ -141,10 +141,16 @@ defmodule Eqmi.Control do
     cid = get_cid(h)
 
     response =
-      if cid != nil do
-        {:ok, cid}
-      else
-        {:error, :cid_not_present}
+      cond do
+        cid != nil ->
+          {:ok, cid}
+
+        true ->
+          # surface the modem's error (e.g. client IDs exhausted)
+          case qmi_result(msg) do
+            :ok -> {:error, :cid_not_present}
+            err -> err
+          end
       end
 
     GenStateMachine.reply(data.client_pid, response)
@@ -167,10 +173,15 @@ defmodule Eqmi.Control do
     {:keep_state_and_data, [:postpone]}
   end
 
-  def wait4_release(:info, {:qmux, _msg}, data) do
-    GenStateMachine.reply(data.client_pid, :ok)
+  def wait4_release(:info, {:qmux, %{message_type: :response} = msg}, data) do
+    GenStateMachine.reply(data.client_pid, qmi_result(msg))
     new_data = %{data | client_pid: nil}
     {:next_state, :idle, new_data}
+  end
+
+  def wait4_release(:info, {:qmux, msg}, _data) do
+    Logger.warning("Waiting 4 release response [#{inspect(msg)}]")
+    :keep_state_and_data
   end
 
   def wait4_release(:state_timeout, :release_response, data) do
@@ -192,7 +203,19 @@ defmodule Eqmi.Control do
   end
 
   defp get_cid(_msg) do
-    {:error, :not_supported}
+    nil
+  end
+
+  defp qmi_result(%{messages: [%{parameters: params} | _]}) do
+    case Enum.find_value(params, &Map.get(&1, :result)) do
+      %{error_status: 0, error_code: 0} -> :ok
+      nil -> {:error, :no_result_tlv}
+      result -> {:error, {:qmi_error, result}}
+    end
+  end
+
+  defp qmi_result(_msg) do
+    {:error, :bad_response}
   end
 
   defp ctl_msg_base(msg_type, params, tx_id) do

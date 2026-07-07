@@ -1,6 +1,7 @@
 defmodule Eqmi.Device do
   use GenServer
   alias Eqmi.Types
+  require Logger
 
   @ctl_id 0
 
@@ -221,11 +222,21 @@ defmodule Eqmi.Device do
   end
 
   def handle_info({:qmux, header, messages}, %{clients: clients} = s) do
-    msg = process_service(header, messages)
-    client = find_client(clients, header.service_type, header.client_id)
+    # a decoder bug must not take the whole device down; drop the
+    # message and keep serving the other clients
+    try do
+      msg = process_service(header, messages)
+      client = find_client(clients, header.service_type, header.client_id)
 
-    if client != nil do
-      send(client, {:qmux, msg})
+      if client != nil do
+        send(client, {:qmux, msg})
+      end
+    rescue
+      e ->
+        Logger.error(
+          "failed to decode qmux message #{inspect(header)} " <>
+            "payload #{inspect(messages, base: :hex, limit: 128)}: #{Exception.message(e)}"
+        )
     end
 
     {:noreply, s}
