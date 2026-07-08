@@ -1,22 +1,25 @@
 defmodule Eqmi.Tlv do
+  # Numbers wider than a byte can be flagged `"endian": "network"` in the
+  # spec (e.g. the IPv6 address hextets), meaning big-endian on the wire;
+  # everything else is little-endian.
+  defp big_endian?(%{"endian" => "network"}), do: true
+  defp big_endian?(_obj), do: false
+
   def decode_tlv(%{"format" => "guint8"}, data) do
-    <<val::little-unsigned-integer-size(8), rest::binary>> = data
+    <<val::unsigned-integer-size(8), rest::binary>> = data
     {val, rest}
   end
 
-  def decode_tlv(%{"format" => "guint16"}, data) do
-    <<val::little-unsigned-integer-size(16), rest::binary>> = data
-    {val, rest}
+  def decode_tlv(%{"format" => "guint16"} = obj, data) do
+    decode_uint(16, big_endian?(obj), data)
   end
 
-  def decode_tlv(%{"format" => "guint32"}, data) do
-    <<val::little-unsigned-integer-size(32), rest::binary>> = data
-    {val, rest}
+  def decode_tlv(%{"format" => "guint32"} = obj, data) do
+    decode_uint(32, big_endian?(obj), data)
   end
 
-  def decode_tlv(%{"format" => "guint64"}, data) do
-    <<val::little-unsigned-integer-size(64), rest::binary>> = data
-    {val, rest}
+  def decode_tlv(%{"format" => "guint64"} = obj, data) do
+    decode_uint(64, big_endian?(obj), data)
   end
 
   def decode_tlv(%{"format" => "gfloat"}, data) do
@@ -30,29 +33,21 @@ defmodule Eqmi.Tlv do
   end
 
   def decode_tlv(%{"format" => "gint8"}, data) do
-    <<val::little-signed-integer-size(8), rest::binary>> = data
+    <<val::signed-integer-size(8), rest::binary>> = data
     {val, rest}
   end
 
-  def decode_tlv(%{"format" => "gint16"}, data) do
-    <<val::little-signed-integer-size(16), rest::binary>> = data
-    {val, rest}
+  def decode_tlv(%{"format" => "gint16"} = obj, data) do
+    decode_sint(16, big_endian?(obj), data)
   end
 
-  def decode_tlv(%{"format" => "gint32"}, data) do
-    <<val::little-signed-integer-size(32), rest::binary>> = data
-    {val, rest}
+  def decode_tlv(%{"format" => "gint32"} = obj, data) do
+    decode_sint(32, big_endian?(obj), data)
   end
 
   def decode_tlv(%{"format" => "guint-sized"} = obj, data) do
-    s =
-      obj["guint-size"]
-      |> String.to_integer()
-
-    bit_number = s * 8
-
-    <<val::little-unsigned-integer-size(bit_number), rest::binary>> = data
-    {val, rest}
+    bit_number = String.to_integer(obj["guint-size"]) * 8
+    decode_uint(bit_number, big_endian?(obj), data)
   end
 
   def decode_tlv(%{"format" => "sequence"} = obj, data) do
@@ -314,6 +309,26 @@ defmodule Eqmi.Tlv do
   defp encode_type(id) do
     id
     |> Eqmi.Builder.Utils.id_from_str()
+  end
+
+  defp decode_uint(bits, true, data) do
+    <<val::big-unsigned-integer-size(^bits), rest::binary>> = data
+    {val, rest}
+  end
+
+  defp decode_uint(bits, false, data) do
+    <<val::little-unsigned-integer-size(^bits), rest::binary>> = data
+    {val, rest}
+  end
+
+  defp decode_sint(bits, true, data) do
+    <<val::big-signed-integer-size(^bits), rest::binary>> = data
+    {val, rest}
+  end
+
+  defp decode_sint(bits, false, data) do
+    <<val::little-signed-integer-size(^bits), rest::binary>> = data
+    {val, rest}
   end
 
   defp build_array(0, rest, _, acc) do
