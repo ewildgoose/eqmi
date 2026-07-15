@@ -5,43 +5,12 @@ defmodule Eqmi do
   @moduledoc """
   Documentation for `Eqmi`.
   """
-  @service_types %{
-    0 => :qmi_ctl,
-    1 => :qmi_wds,
-    2 => :qmi_dms,
-    3 => :qmi_nas,
-    4 => :qmi_qos,
-    5 => :qmi_wms,
-    6 => :qmi_pds,
-    9 => :qmi_voice,
-    10 => :qmi_cat,
-    11 => :qmi_uim,
-    12 => :qmi_pbm,
-    14 => :qmi_cat,
-    16 => :qmi_loc,
-    17 => :qmi_sar,
-    20 => :qmi_wda,
-    226 => :qmi_oma,
-    231 => :qmi_gms,
-    232 => :qmi_gas
-  }
-  @message_types %{0 => :request, 2 => :response, 4 => :indication}
 
-  def message_type_id(msg_name) do
-    @message_types
-    |> get_id(msg_name)
-  end
-
-  def service_type_id(msg_name) do
-    @service_types
-    |> get_id(msg_name)
-  end
-
-  defp get_id(types, name) do
-    types
-    |> Enum.find(fn {_key, val} -> val == name end)
-    |> elem(0)
-  end
+  # Service and message-type id lookups live in Eqmi.Types (the single
+  # source of truth used for both header encode/decode and CID allocation);
+  # these delegate so callers keep a stable Eqmi.* API.
+  defdelegate message_type_id(msg_name), to: Eqmi.Types, as: :message_id
+  defdelegate service_type_id(msg_name), to: Eqmi.Types, as: :service_id
 
   def qmux_message(header, payload) do
     if_type = <<1::little-unsigned-integer-size(8)>>
