@@ -81,7 +81,7 @@ defmodule Eqmi.Tlv do
           decode_tlv(%{"format" => prefix || "guint8"}, data)
       end
 
-    <<val::binary-size(len), rest::binary>> = payload
+    <<val::binary-size(^len), rest::binary>> = payload
 
     # modems mix ASCII, GSM-7 packed and UCS-2LE in string fields;
     # fixed-size strings are copied raw, like libqmi does

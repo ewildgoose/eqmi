@@ -119,7 +119,7 @@ defmodule Eqmi.Mbim do
   defp qmi_from(total, _uuid, _info, _len) when total > 1, do: {:fragmented, total}
 
   defp qmi_from(_total, @uuid_qmi, info, info_len) do
-    <<qmi::binary-size(info_len), _pad::binary>> = info
+    <<qmi::binary-size(^info_len), _pad::binary>> = info
     {:qmi, qmi}
   end
 

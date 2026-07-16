@@ -118,7 +118,7 @@ defmodule Eqmi.Reader do
   defp emit_qmux(pid, <<1, len::little-unsigned-integer-size(16), rest::binary>>)
        when len >= 5 do
     body_len = len - 2
-    <<body::binary-size(body_len), _extra::binary>> = rest
+    <<body::binary-size(^body_len), _extra::binary>> = rest
     <<h::binary-size(3), sdu::binary>> = body
     send(pid, {:qmux, Eqmi.QmuxHeader.parse(h), sdu})
   end

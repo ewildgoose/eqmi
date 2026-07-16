@@ -121,7 +121,7 @@ defmodule Eqmi.Builder do
         <<m::little-binary-size(2), l::little-binary-size(2), rest::binary>> = content
         len = :binary.decode_unsigned(l, :little)
         msg_id = :binary.decode_unsigned(m, :little)
-        <<tlv_bin::binary-size(len), rem_msgs::binary>> = rest
+        <<tlv_bin::binary-size(^len), rem_msgs::binary>> = rest
         params = proc_ctl_tlv(tlv_bin, msg_id, decode_func, [])
         message = %{msg_id: msg_id, parameters: params}
         new_msgs = [message | msgs]
@@ -136,7 +136,7 @@ defmodule Eqmi.Builder do
         <<id::binary-size(1), l::binary-size(2), buffer::binary>> = content
 
         tlv_len = :binary.decode_unsigned(l, :little)
-        <<tlv_content::binary-size(tlv_len), rest::binary>> = buffer
+        <<tlv_content::binary-size(^tlv_len), rest::binary>> = buffer
         p = decode_func.(msg_id, id, tlv_content)
         proc_ctl_tlv(rest, msg_id, decode_func, [p | params])
       end
