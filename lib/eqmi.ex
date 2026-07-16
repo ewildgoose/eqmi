@@ -27,9 +27,16 @@ defmodule Eqmi do
               pid: nil
   end
 
-  @spec device(String.t()) :: {:ok, reference()} | {:error, term()}
-  def device(path) do
-    GenServer.call(__MODULE__, {:get_device, path})
+  @doc """
+  Open (or fetch) a QMI device. Options:
+
+    * `:transport` - `:raw` (default, cdc-wdm QMUX) or `:mbim`
+      (QMI-over-MBIM passthrough for a modem in MBIM mode)
+  """
+  @spec device(String.t(), keyword()) :: {:ok, reference()} | {:error, term()}
+  def device(path, opts \\ []) do
+    # the MBIM transport does a CLOSE/OPEN handshake in init, so allow time
+    GenServer.call(__MODULE__, {:get_device, path, opts}, 15_000)
   end
 
   def start_link(_args) do
@@ -84,12 +91,12 @@ defmodule Eqmi do
     {:ok, %{devices: %{}, refs: %{}}}
   end
 
-  def handle_call({:get_device, device_path}, _from, state) do
+  def handle_call({:get_device, device_path, opts}, _from, state) do
     path = device_path |> String.trim()
 
     case Map.get(state.devices, path) do
       nil ->
-        spec = {Eqmi.Device, device: path}
+        spec = {Eqmi.Device, [device: path] ++ opts}
 
         case DynamicSupervisor.start_child(Eqmi.DynamicSupervisor, spec) do
           {:ok, _pid} ->

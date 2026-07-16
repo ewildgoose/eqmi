@@ -93,30 +93,99 @@ defmodule Eqmi.Device do
 
   def init(args) do
     device = Keyword.fetch!(args, :device)
+    transport = Keyword.get(args, :transport, :raw)
     options = [:write, :raw]
 
     case File.open(device, options) do
       {:ok, dev} ->
-        {:ok, reader} = Eqmi.Reader.start_link(self(), device)
+        {:ok, reader} = Eqmi.Reader.start_link(self(), device, transport)
 
-        {:ok, ctl} =
-          device
-          |> Eqmi.Control.start_link()
+        state = %{
+          reader: reader,
+          device: dev,
+          device_name: device,
+          transport: transport,
+          mbim_tx: 1,
+          control_points: %{},
+          clients: %{},
+          pending: %{},
+          ctl: nil
+        }
 
-        {:ok,
-         %{
-           reader: reader,
-           device: dev,
-           device_name: device,
-           control_points: %{},
-           clients: %{:qmi_ctl => %{@ctl_id => ctl}},
-           pending: %{},
-           ctl: ctl
-         }}
+        # Finish the transport handshake (a no-op for raw) before starting
+        # Control, so the device is fully usable the moment init returns.
+        case open_transport(state) do
+          {:ok, state} -> {:ok, start_control(state)}
+          {:error, reason} -> {:stop, reason}
+        end
 
       {:error, reason} ->
         {:stop, reason}
     end
+  end
+
+  # Raw QMUX is ready immediately; MBIM must complete an OPEN handshake
+  # before any QMI command is accepted. The reader delivers OPEN_DONE to us,
+  # so block init on it (bounded) - the mailbox holds it until we read.
+  #
+  # A previous client that exited without closing leaves the session open,
+  # and this class of modem won't answer a fresh OPEN on an open session, so
+  # CLOSE first (best effort) to reset it.
+  defp open_transport(%{transport: :raw} = s), do: {:ok, s}
+
+  defp open_transport(%{transport: :mbim} = s) do
+    s = mbim_close(s)
+
+    IO.binwrite(s.device, Eqmi.Mbim.open(s.mbim_tx))
+    s = %{s | mbim_tx: s.mbim_tx + 1}
+
+    receive do
+      {:mbim_open_done, 0} ->
+        Logger.info("MBIM opened on #{s.device_name}")
+        {:ok, s}
+
+      {:mbim_open_done, status} ->
+        Logger.error("MBIM OPEN failed on #{s.device_name}: status #{status}")
+        {:error, {:mbim_open, status}}
+
+      {:error, reason} ->
+        Logger.error("MBIM reader error during open on #{s.device_name}: #{inspect(reason)}")
+        {:error, {:reader, reason}}
+    after
+      5_000 ->
+        Logger.error("MBIM OPEN timed out on #{s.device_name} (device may be wedged)")
+        {:error, :mbim_open_timeout}
+    end
+  end
+
+  # Best-effort MBIM CLOSE: wait briefly for CLOSE_DONE, but proceed either
+  # way (a fresh/closed session simply won't answer).
+  defp mbim_close(s) do
+    IO.binwrite(s.device, Eqmi.Mbim.close(s.mbim_tx))
+
+    receive do
+      {:mbim_close_done, _status} -> :ok
+    after
+      1_000 -> :ok
+    end
+
+    %{s | mbim_tx: s.mbim_tx + 1}
+  end
+
+  defp start_control(s) do
+    {:ok, ctl} = Eqmi.Control.start_link(s.device_name)
+    %{s | ctl: ctl, clients: %{:qmi_ctl => %{@ctl_id => ctl}}}
+  end
+
+  # Wrap an outgoing QMUX message for the active transport and write it,
+  # returning the write result and the (possibly tx-advanced) state.
+  defp write_qmux(%{transport: :mbim, device: dev, mbim_tx: tx} = s, qmux_msg) do
+    res = IO.binwrite(dev, Eqmi.Mbim.command(tx, qmux_msg))
+    {res, %{s | mbim_tx: tx + 1}}
+  end
+
+  defp write_qmux(%{device: dev} = s, qmux_msg) do
+    {IO.binwrite(dev, qmux_msg), s}
   end
 
   # Build a service request frame and return the transaction id used, so
@@ -171,13 +240,13 @@ defmodule Eqmi.Device do
   def handle_call(
         {:send_msg, ref, msg},
         _from,
-        %{device: dev, control_points: controls} = s
+        %{control_points: controls} = s
       ) do
     case Map.get(controls, ref) do
       %ClientState{} = client ->
         {tx_id, qmux_msg} = build_client_msg(client, msg)
+        {res, s} = write_qmux(s, qmux_msg)
         new_ctrls = Map.put(controls, ref, %{client | current_tx: tx_id})
-        res = IO.binwrite(dev, qmux_msg)
 
         {:reply, res, %{s | control_points: new_ctrls}}
 
@@ -189,14 +258,15 @@ defmodule Eqmi.Device do
   def handle_call(
         {:call_msg, ref, msg, timeout},
         from,
-        %{device: dev, control_points: controls} = s
+        %{control_points: controls} = s
       ) do
     case Map.get(controls, ref) do
       %ClientState{} = client ->
         {tx_id, qmux_msg} = build_client_msg(client, msg)
+        {write_res, s} = write_qmux(s, qmux_msg)
         new_ctrls = Map.put(controls, ref, %{client | current_tx: tx_id})
 
-        case IO.binwrite(dev, qmux_msg) do
+        case write_res do
           :ok ->
             key = {client.type, client.id, tx_id}
             timer = Process.send_after(self(), {:call_timeout, key}, timeout)
@@ -212,8 +282,8 @@ defmodule Eqmi.Device do
     end
   end
 
-  def handle_call({:send_raw, msg}, _from, %{device: dev} = s) do
-    res = IO.binwrite(dev, msg)
+  def handle_call({:send_raw, msg}, _from, s) do
+    {res, s} = write_qmux(s, msg)
     {:reply, res, s}
   end
 
@@ -259,6 +329,7 @@ defmodule Eqmi.Device do
     end
   end
 
+
   def handle_info({:DOWN, ref, :process, _object, _reason}, state) do
     # release the CID on the modem too, or it stays allocated until the
     # modem reboots; async because Control calls back into this server
@@ -286,6 +357,12 @@ defmodule Eqmi.Device do
   def handle_info(msg, s) do
     Logger.warning("unexpected message in Eqmi.Device: #{inspect(msg)}")
     {:noreply, s}
+  end
+
+  def terminate(_reason, %{transport: :mbim} = s) do
+    # close the MBIM session so the next client can OPEN cleanly
+    IO.binwrite(s.device, Eqmi.Mbim.close(s.mbim_tx))
+    File.close(s.device)
   end
 
   def terminate(_reason, s) do
